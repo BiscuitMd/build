@@ -4,28 +4,274 @@ on:
   workflow_dispatch:
     inputs:
       target_dir:
-        description: 'Target directory'
+        description: 'Target directory (folder tempat zip disimpan)'
         required: true
+        type: string
+      zip_file:
+        description: 'Nama file zip project'
+        required: false
+        default: 'project.zip'
+        type: string
+      build_task:
+        description: 'Gradle task'
+        required: false
+        default: 'assembleRelease'
+        type: choice
+        options:
+          - assembleRelease
+          - assembleDebug
+          - bundleRelease
+          - bundleDebug
+      build_flavor:
+        description: 'Product flavor (kosongkan kalau tidak ada)'
+        required: false
+        default: ''
+        type: string
+      java_version:
+        description: 'Versi Java'
+        required: false
+        default: '17'
+        type: string
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+
     steps:
-      - uses: actions/checkout@v4
-      
-      - uses: actions/setup-java@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Validate Target Directory
+        id: validate
+        run: |
+          echo "::group::Validate"
+          TARGET="${{ github.event.inputs.target_dir }}"
+          ZIP="${{ github.event.inputs.zip_file }}"
+
+          if [ ! -d "$TARGET" ]; then
+            echo "::error::Target directory tidak ditemukan: $TARGET"
+            exit 1
+          fi
+
+          if [ ! -f "$TARGET/$ZIP" ]; then
+            echo "::error::File zip tidak ditemukan: $TARGET/$ZIP"
+            echo "Isi folder $TARGET:"
+            ls -la "$TARGET" || true
+            exit 1
+          fi
+
+          echo "target=$TARGET" >> $GITHUB_OUTPUT
+          echo "zip=$ZIP" >> $GITHUB_OUTPUT
+          echo "✓ Validation OK"
+          echo "::endgroup::"
+
+      - name: Extract Project Zip
+        id: extract
+        run: |
+          echo "::group::Extract"
+          TARGET="${{ steps.validate.outputs.target }}"
+          ZIP="${{ steps.validate.outputs.zip }}"
+          EXTRACT_DIR="$TARGET/project"
+
+          rm -rf "$EXTRACT_DIR"
+          mkdir -p "$EXTRACT_DIR"
+
+          unzip -o "$TARGET/$ZIP" -d "$EXTRACT_DIR"
+
+          echo "::group::Extracted Files"
+          ls -la "$EXTRACT_DIR"
+          echo "::endgroup::"
+
+          echo "extract_dir=$EXTRACT_DIR" >> $GITHUB_OUTPUT
+          echo "✓ Extract OK"
+          echo "::endgroup::"
+
+      - name: Detect Gradle Project Root
+        id: detect_root
+        run: |
+          echo "::group::Detect Root"
+          EXTRACT_DIR="${{ steps.extract.outputs.extract_dir }}"
+
+          if [ -f "$EXTRACT_DIR/settings.gradle" ] || [ -f "$EXTRACT_DIR/settings.gradle.kts" ]; then
+            ROOT="$EXTRACT_DIR"
+          elif [ -f "$EXTRACT_DIR/gradlew" ]; then
+            ROOT="$EXTRACT_DIR"
+          else
+            FOUND=$(find "$EXTRACT_DIR" -maxdepth 4 \( -name "settings.gradle" -o -name "settings.gradle.kts" -o -name "gradlew" \) -type f | head -n 1)
+            if [ -z "$FOUND" ]; then
+              echo "::error::Project Gradle tidak ditemukan (settings.gradle / gradlew)."
+              echo "Isi folder:"
+              find "$EXTRACT_DIR" -maxdepth 3 -type f | head -n 50
+              exit 1
+            fi
+            ROOT=$(dirname "$FOUND")
+          fi
+
+          echo "root=$ROOT" >> $GITHUB_OUTPUT
+          echo "✓ Gradle project root: $ROOT"
+
+          echo "::group::Project Structure"
+          ls -la "$ROOT" | head -n 30
+          echo "::endgroup::"
+          echo "::endgroup::"
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '17'
-      
-      - name: Build APK
+          java-version: ${{ github.event.inputs.java_version }}
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles(format('{0}/**/*.gradle*', steps.detect_root.outputs.root)) }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: Grant Execute Permission for gradlew
+        working-directory: ${{ steps.detect_root.outputs.root }}
         run: |
-          cd ${{ github.event.inputs.target_dir }}
-          chmod +x gradlew
-          ./gradlew assembleRelease
-      
+          echo "::group::Chmod"
+          chmod +x gradlew || true
+          ls -la gradlew
+          echo "::endgroup::"
+
+      - name: Auto-Fix local.properties
+        working-directory: ${{ steps.detect_root.outputs.root }}
+        run: |
+          echo "::group::Local Props"
+          if [ -f "local.properties" ]; then
+            rm -f local.properties
+          fi
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+          cat local.properties
+          echo "::endgroup::"
+
+      - name: Build with Gradle
+        working-directory: ${{ steps.detect_root.outputs.root }}
+        run: |
+          echo "::group::Gradle Build"
+          TASK="${{ github.event.inputs.build_task }}"
+          FLAVOR="${{ github.event.inputs.build_flavor }}"
+
+          if [ -n "$FLAVOR" ]; then
+            CAP_FLAVOR="$(echo ${FLAVOR:0:1} | tr '[:lower:]' '[:upper:]')${FLAVOR:1}"
+            FINAL_TASK="${TASK}${CAP_FLAVOR}"
+          else
+            FINAL_TASK="$TASK"
+          fi
+
+          echo "Running: ./gradlew $FINAL_TASK"
+          ./gradlew "$FINAL_TASK" --no-daemon --stacktrace
+          echo "::endgroup::"
+
+      - name: Locate APK/AAB Artifacts
+        id: locate
+        run: |
+          echo "::group::Locate Artifacts"
+          ROOT="${{ steps.detect_root.outputs.root }}"
+
+          APK_DIR="$ROOT/app/build/outputs/apk"
+          AAB_DIR="$ROOT/app/build/outputs/bundle"
+
+          APKS=""
+          AABS=""
+
+          if [ -d "$APK_DIR" ]; then
+            APKS=$(find "$APK_DIR" -name "*.apk" -type f)
+          fi
+
+          if [ -d "$AAB_DIR" ]; then
+            AABS=$(find "$AAB_DIR" -name "*.aab" -type f)
+          fi
+
+          if [ -z "$APKS" ] && [ -z "$AABS" ]; then
+            echo "::error::Tidak ada APK/AAB yang dihasilkan"
+            echo "Isi folder app/build/outputs:"
+            find "$ROOT/app/build/outputs" -type f 2>/dev/null | head -n 50 || true
+            exit 1
+          fi
+
+          echo "apks<<EOF" >> $GITHUB_OUTPUT
+          echo "$APKS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          echo "aabs<<EOF" >> $GITHUB_OUTPUT
+          echo "$AABS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          echo "✓ APKs:"
+          echo "$APKS"
+          echo "✓ AABs:"
+          echo "$AABS"
+          echo "::endgroup::"
+
+      - name: Generate Build Info
+        run: |
+          echo "::group::Build Info"
+          {
+            echo "=== NATIVE BUILD INFO ==="
+            echo "Job ID: ${{ github.run_id }}"
+            echo "Run Number: ${{ github.run_number }}"
+            echo "Target Dir: ${{ github.event.inputs.target_dir }}"
+            echo "Zip File: ${{ github.event.inputs.zip_file }}"
+            echo "Build Task: ${{ github.event.inputs.build_task }}"
+            echo "Build Flavor: ${{ github.event.inputs.build_flavor }}"
+            echo "Java Version: ${{ github.event.inputs.java_version }}"
+            echo "Project Root: ${{ steps.detect_root.outputs.root }}"
+            echo "Commit: ${{ github.sha }}"
+            echo "Actor: ${{ github.actor }}"
+            echo "Started: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          } > BUILD_INFO.txt
+
+          cat BUILD_INFO.txt
+          echo "::endgroup::"
+
       - name: Upload APK
+        if: ${{ steps.locate.outputs.apks != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: apk-release
-          path: ${{ github.event.inputs.target_dir }}/app/build/outputs/apk/release/app-release.apk
+          path: |
+            ${{ steps.detect_root.outputs.root }}/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload App Bundle
+        if: ${{ steps.locate.outputs.aabs != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: appbundle-release
+          path: |
+            ${{ steps.detect_root.outputs.root }}/app/build/outputs/bundle/**/*.aab
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload Build Info
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-info
+          path: BUILD_INFO.txt
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Native Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Job ID | ${{ github.run_id }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build Task | ${{ github.event.inputs.build_task }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Flavor | ${{ github.event.inputs.build_flavor }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Java | ${{ github.event.inputs.java_version }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Status | ${{ job.status }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
