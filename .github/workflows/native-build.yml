@@ -36,7 +36,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
       - name: Checkout Repository
@@ -58,7 +58,6 @@ jobs:
 
           if [ ! -f "$TARGET/$ZIP" ]; then
             echo "::error::File zip tidak ditemukan: $TARGET/$ZIP"
-            echo "Isi folder $TARGET:"
             ls -la "$TARGET" || true
             exit 1
           fi
@@ -103,7 +102,6 @@ jobs:
             FOUND=$(find "$EXTRACT_DIR" -maxdepth 4 \( -name "settings.gradle" -o -name "settings.gradle.kts" -o -name "gradlew" \) -type f | head -n 1)
             if [ -z "$FOUND" ]; then
               echo "::error::Project Gradle tidak ditemukan (settings.gradle / gradlew)."
-              echo "Isi folder:"
               find "$EXTRACT_DIR" -maxdepth 3 -type f | head -n 50
               exit 1
             fi
@@ -193,7 +191,6 @@ jobs:
 
           if [ -z "$APKS" ] && [ -z "$AABS" ]; then
             echo "::error::Tidak ada APK/AAB yang dihasilkan"
-            echo "Isi folder app/build/outputs:"
             find "$ROOT/app/build/outputs" -type f 2>/dev/null | head -n 50 || true
             exit 1
           fi
@@ -213,6 +210,7 @@ jobs:
           echo "::endgroup::"
 
       - name: Generate Build Info
+        if: always()
         run: |
           echo "::group::Build Info"
           {
@@ -227,7 +225,7 @@ jobs:
             echo "Project Root: ${{ steps.detect_root.outputs.root }}"
             echo "Commit: ${{ github.sha }}"
             echo "Actor: ${{ github.actor }}"
-            echo "Started: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+            echo "Finished: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
           } > BUILD_INFO.txt
 
           cat BUILD_INFO.txt
