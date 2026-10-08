@@ -48,7 +48,8 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
@@ -61,14 +62,37 @@ jobs:
       - name: Show Config
         run: cat "${{ github.event.inputs.target_dir }}/${{ github.event.inputs.config_file }}"
 
-      - name: Setup Java
+      - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'zulu'
+          distribution: 'temurin'
           java-version: '17'
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        run: |
+          # Buat folder SDK
+          mkdir -p $HOME/android-sdk/cmdline-tools
+          cd $HOME/android-sdk
+
+          # Download commandline tools latest
+          echo "Downloading cmdline-tools..."
+          curl -sSL "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip" -o cmdline-tools.zip
+          unzip -q cmdline-tools.zip -d cmdline-tools-tmp
+          mv cmdline-tools-tmp/cmdline-tools cmdline-tools/latest
+          rm -rf cmdline-tools-tmp cmdline-tools.zip
+
+          # Set environment
+          echo "ANDROID_SDK_ROOT=$HOME/android-sdk" >> $GITHUB_ENV
+          echo "ANDROID_HOME=$HOME/android-sdk" >> $GITHUB_ENV
+          echo "$HOME/android-sdk/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          echo "$HOME/android-sdk/platform-tools" >> $GITHUB_PATH
+
+      - name: Accept Licenses & Install Packages
+        run: |
+          # Accept licenses
+          yes | sdkmanager --licenses || true
+          # Install packages yang dibutuhin (TANPA 'tools' yang udah deprecated)
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
 
       - name: Create Project
         id: create
@@ -85,15 +109,17 @@ jobs:
           mkdir -p "$PROJECT_DIR/gradle/wrapper"
           echo "dir=$PROJECT_DIR" >> $GITHUB_OUTPUT
 
-      - name: Write Gradle Files
+      - name: Write settings.gradle
         run: |
           DIR="${{ steps.create.outputs.dir }}"
-
           cat > "$DIR/settings.gradle" << 'EOF'
           rootProject.name = "WebToApp"
           include ':app'
           EOF
 
+      - name: Write build.gradle
+        run: |
+          DIR="${{ steps.create.outputs.dir }}"
           cat > "$DIR/build.gradle" << 'EOF'
           buildscript {
               repositories { google(); mavenCentral() }
@@ -104,12 +130,18 @@ jobs:
           }
           EOF
 
+      - name: Write gradle.properties
+        run: |
+          DIR="${{ steps.create.outputs.dir }}"
           cat > "$DIR/gradle.properties" << 'EOF'
           org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
           android.useAndroidX=true
           android.enableJetifier=true
           EOF
 
+      - name: Write gradle-wrapper.properties
+        run: |
+          DIR="${{ steps.create.outputs.dir }}"
           cat > "$DIR/gradle/wrapper/gradle-wrapper.properties" << 'EOF'
           distributionBase=GRADLE_USER_HOME
           distributionPath=wrapper/dists
@@ -118,7 +150,7 @@ jobs:
           zipStorePath=wrapper/dists
           EOF
 
-      - name: Write App build.gradle
+      - name: Write app/build.gradle
         run: |
           DIR="${{ steps.create.outputs.dir }}"
           cat > "$DIR/app/build.gradle" << 'EOF'
@@ -154,7 +186,7 @@ jobs:
           }
           EOF
 
-      - name: Write AndroidManifest
+      - name: Write AndroidManifest.xml
         run: |
           DIR="${{ steps.create.outputs.dir }}"
           ORIENTATION="${{ github.event.inputs.orientation }}"
@@ -306,20 +338,23 @@ jobs:
           DIR="${{ steps.create.outputs.dir }}"
           BUILD_TYPE="${{ github.event.inputs.build_type }}"
           if [ "$BUILD_TYPE" = "release" ]; then
-            APK=$(find "$DIR/app/build/outputs/apk/release" -name "*.apk" | head -n 1)
+            APK=$(find "$DIR/app/build/outputs/apk/release" -name "*.apk" 2>/dev/null | head -n 1)
           else
-            APK=$(find "$DIR/app/build/outputs/apk/debug" -name "*.apk" | head -n 1)
+            APK=$(find "$DIR/app/build/outputs/apk/debug" -name "*.apk" 2>/dev/null | head -n 1)
           fi
           if [ -z "$APK" ]; then
             echo "::error::APK tidak ditemukan"
+            find "$DIR/app/build" -name "*.apk" 2>/dev/null || true
             exit 1
           fi
           echo "apk=$APK" >> $GITHUB_OUTPUT
+          echo "✓ APK: $APK"
 
       - name: Rename APK
         run: |
           APK="${{ steps.locate.outputs.apk }}"
-          mv "$APK" "${APK%/*}/app-release.apk"
+          DIR=$(dirname "$APK")
+          mv "$APK" "$DIR/app-release.apk"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
