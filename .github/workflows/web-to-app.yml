@@ -1,0 +1,342 @@
+name: Web To App Builder
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_dir:
+        description: 'Target directory'
+        required: true
+        type: string
+      config_file:
+        description: 'Nama file config'
+        required: false
+        default: 'config.json'
+        type: string
+      app_name:
+        description: 'Nama aplikasi'
+        required: true
+        type: string
+      app_url:
+        description: 'URL web'
+        required: true
+        type: string
+      icon_file:
+        description: 'Nama file icon'
+        required: false
+        default: 'icon.png'
+        type: string
+      build_type:
+        description: 'debug / release'
+        required: false
+        default: 'debug'
+        type: choice
+        options:
+          - debug
+          - release
+      orientation:
+        description: 'portrait / landscape'
+        required: false
+        default: 'portrait'
+        type: choice
+        options:
+          - portrait
+          - landscape
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Validate
+        run: |
+          TARGET="${{ github.event.inputs.target_dir }}"
+          [ -d "$TARGET" ] || { echo "::error::Target tidak ada"; exit 1; }
+          [ -f "$TARGET/${{ github.event.inputs.config_file }}" ] || { echo "::error::Config tidak ada"; exit 1; }
+
+      - name: Show Config
+        run: cat "${{ github.event.inputs.target_dir }}/${{ github.event.inputs.config_file }}"
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Create Project
+        id: create
+        run: |
+          PROJECT_DIR="${{ github.event.inputs.target_dir }}/app_project"
+          mkdir -p "$PROJECT_DIR/app/src/main/java/com/spartax/webtoapp"
+          mkdir -p "$PROJECT_DIR/app/src/main/res/layout"
+          mkdir -p "$PROJECT_DIR/app/src/main/res/values"
+          mkdir -p "$PROJECT_DIR/app/src/main/res/mipmap-hdpi"
+          mkdir -p "$PROJECT_DIR/app/src/main/res/mipmap-mdpi"
+          mkdir -p "$PROJECT_DIR/app/src/main/res/mipmap-xhdpi"
+          mkdir -p "$PROJECT_DIR/app/src/main/res/mipmap-xxhdpi"
+          mkdir -p "$PROJECT_DIR/app/src/main/res/mipmap-xxxhdpi"
+          mkdir -p "$PROJECT_DIR/gradle/wrapper"
+          echo "dir=$PROJECT_DIR" >> $GITHUB_OUTPUT
+
+      - name: Write Gradle Files
+        run: |
+          DIR="${{ steps.create.outputs.dir }}"
+
+          cat > "$DIR/settings.gradle" << 'EOF'
+          rootProject.name = "WebToApp"
+          include ':app'
+          EOF
+
+          cat > "$DIR/build.gradle" << 'EOF'
+          buildscript {
+              repositories { google(); mavenCentral() }
+              dependencies { classpath 'com.android.tools.build:gradle:8.1.4' }
+          }
+          allprojects {
+              repositories { google(); mavenCentral() }
+          }
+          EOF
+
+          cat > "$DIR/gradle.properties" << 'EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          android.enableJetifier=true
+          EOF
+
+          cat > "$DIR/gradle/wrapper/gradle-wrapper.properties" << 'EOF'
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-8.2-bin.zip
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          EOF
+
+      - name: Write App build.gradle
+        run: |
+          DIR="${{ steps.create.outputs.dir }}"
+          cat > "$DIR/app/build.gradle" << 'EOF'
+          plugins { id 'com.android.application' }
+
+          android {
+              namespace 'com.spartax.webtoapp'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId "com.spartax.webtoapp"
+                  minSdk 21
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+
+              buildTypes {
+                  release { minifyEnabled false; signingConfig signingConfigs.debug }
+                  debug { minifyEnabled false }
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+
+          dependencies {
+              implementation 'androidx.appcompat:appcompat:1.6.1'
+              implementation 'com.google.android.material:material:1.11.0'
+              implementation 'androidx.webkit:webkit:1.10.0'
+          }
+          EOF
+
+      - name: Write AndroidManifest
+        run: |
+          DIR="${{ steps.create.outputs.dir }}"
+          ORIENTATION="${{ github.event.inputs.orientation }}"
+          if [ "$ORIENTATION" = "portrait" ]; then
+            SCREEN="portrait"
+          else
+            SCREEN="landscape"
+          fi
+
+          cat > "$DIR/app/src/main/AndroidManifest.xml" << EOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+              <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+
+              <application
+                  android:allowBackup="true"
+                  android:icon="@mipmap/ic_launcher"
+                  android:label="@string/app_name"
+                  android:usesCleartextTraffic="true"
+                  android:theme="@style/Theme.AppCompat.Light.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:screenOrientation="${SCREEN}"
+                      android:configChanges="orientation|screenSize|keyboardHidden"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+      - name: Write MainActivity.java
+        run: |
+          DIR="${{ steps.create.outputs.dir }}"
+          cat > "$DIR/app/src/main/java/com/spartax/webtoapp/MainActivity.java" << 'EOF'
+          package com.spartax.webtoapp;
+
+          import android.annotation.SuppressLint;
+          import android.os.Bundle;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import android.webkit.WebChromeClient;
+          import android.view.KeyEvent;
+          import androidx.appcompat.app.AppCompatActivity;
+
+          public class MainActivity extends AppCompatActivity {
+              private WebView webView;
+
+              @SuppressLint("SetJavaScriptEnabled")
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  setContentView(R.layout.activity_main);
+
+                  webView = findViewById(R.id.webview);
+                  WebSettings settings = webView.getSettings();
+                  settings.setJavaScriptEnabled(true);
+                  settings.setDomStorageEnabled(true);
+                  settings.setAllowFileAccess(true);
+                  settings.setLoadWithOverviewMode(true);
+                  settings.setUseWideViewPort(true);
+                  settings.setBuiltInZoomControls(true);
+                  settings.setDisplayZoomControls(false);
+                  settings.setSupportZoom(true);
+                  settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+
+                  webView.setWebViewClient(new WebViewClient());
+                  webView.setWebChromeClient(new WebChromeClient());
+
+                  String url = getString(R.string.app_url);
+                  webView.loadUrl(url);
+              }
+
+              @Override
+              public boolean onKeyDown(int keyCode, KeyEvent event) {
+                  if (keyCode == KeyEvent.KEYCODE_BACK && webView.canGoBack()) {
+                      webView.goBack();
+                      return true;
+                  }
+                  return super.onKeyDown(keyCode, event);
+              }
+          }
+          EOF
+
+      - name: Write activity_main.xml
+        run: |
+          DIR="${{ steps.create.outputs.dir }}"
+          cat > "$DIR/app/src/main/res/layout/activity_main.xml" << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent">
+              <WebView
+                  android:id="@+id/webview"
+                  android:layout_width="match_parent"
+                  android:layout_height="match_parent" />
+          </RelativeLayout>
+          EOF
+
+      - name: Write strings.xml
+        run: |
+          DIR="${{ steps.create.outputs.dir }}"
+          cat > "$DIR/app/src/main/res/values/strings.xml" << EOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">${{ github.event.inputs.app_name }}</string>
+              <string name="app_url">${{ github.event.inputs.app_url }}</string>
+          </resources>
+          EOF
+
+      - name: Copy Icon
+        run: |
+          DIR="${{ steps.create.outputs.dir }}"
+          ICON="${{ github.event.inputs.target_dir }}/${{ github.event.inputs.icon_file }}"
+          if [ -f "$ICON" ]; then
+            for d in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
+              cp "$ICON" "$DIR/app/src/main/res/mipmap-$d/ic_launcher.png"
+            done
+            echo "✓ Icon copied"
+          fi
+
+      - name: Download gradlew
+        run: |
+          DIR="${{ steps.create.outputs.dir }}"
+          cd "$DIR"
+          curl -sSL "https://raw.githubusercontent.com/gradle/gradle/v8.2.0/gradlew" -o gradlew
+          curl -sSL "https://raw.githubusercontent.com/gradle/gradle/v8.2.0/gradle/wrapper/gradle-wrapper.jar" -o gradle/wrapper/gradle-wrapper.jar
+          chmod +x gradlew
+
+      - name: Build APK
+        working-directory: ${{ steps.create.outputs.dir }}
+        run: |
+          BUILD_TYPE="${{ github.event.inputs.build_type }}"
+          if [ "$BUILD_TYPE" = "release" ]; then
+            ./gradlew assembleRelease --no-daemon --stacktrace
+          else
+            ./gradlew assembleDebug --no-daemon --stacktrace
+          fi
+
+      - name: Locate APK
+        id: locate
+        run: |
+          DIR="${{ steps.create.outputs.dir }}"
+          BUILD_TYPE="${{ github.event.inputs.build_type }}"
+          if [ "$BUILD_TYPE" = "release" ]; then
+            APK=$(find "$DIR/app/build/outputs/apk/release" -name "*.apk" | head -n 1)
+          else
+            APK=$(find "$DIR/app/build/outputs/apk/debug" -name "*.apk" | head -n 1)
+          fi
+          if [ -z "$APK" ]; then
+            echo "::error::APK tidak ditemukan"
+            exit 1
+          fi
+          echo "apk=$APK" >> $GITHUB_OUTPUT
+
+      - name: Rename APK
+        run: |
+          APK="${{ steps.locate.outputs.apk }}"
+          mv "$APK" "${APK%/*}/app-release.apk"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-to-app-apk
+          path: ${{ steps.create.outputs.dir }}/app/build/outputs/apk/**/app-release.apk
+          retention-days: 7
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Web to App Build" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| App Name | ${{ github.event.inputs.app_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| URL | ${{ github.event.inputs.app_url }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Mode | ${{ github.event.inputs.build_type }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Orientation | ${{ github.event.inputs.orientation }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Status | ${{ job.status }} |" >> $GITHUB_STEP_SUMMARY
