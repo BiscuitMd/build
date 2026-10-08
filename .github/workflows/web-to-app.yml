@@ -70,18 +70,15 @@ jobs:
 
       - name: Setup Android SDK
         run: |
-          # Buat folder SDK
           mkdir -p $HOME/android-sdk/cmdline-tools
           cd $HOME/android-sdk
 
-          # Download commandline tools latest
           echo "Downloading cmdline-tools..."
           curl -sSL "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip" -o cmdline-tools.zip
           unzip -q cmdline-tools.zip -d cmdline-tools-tmp
           mv cmdline-tools-tmp/cmdline-tools cmdline-tools/latest
           rm -rf cmdline-tools-tmp cmdline-tools.zip
 
-          # Set environment
           echo "ANDROID_SDK_ROOT=$HOME/android-sdk" >> $GITHUB_ENV
           echo "ANDROID_HOME=$HOME/android-sdk" >> $GITHUB_ENV
           echo "$HOME/android-sdk/cmdline-tools/latest/bin" >> $GITHUB_PATH
@@ -89,10 +86,49 @@ jobs:
 
       - name: Accept Licenses & Install Packages
         run: |
-          # Accept licenses
           yes | sdkmanager --licenses || true
-          # Install packages yang dibutuhin (TANPA 'tools' yang udah deprecated)
           sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Install ImageMagick
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq imagemagick
+
+      - name: Prepare Icon (Convert to Real PNG)
+        id: prep_icon
+        run: |
+          TARGET="${{ github.event.inputs.target_dir }}"
+          ICON_IN="$TARGET/${{ github.event.inputs.icon_file }}"
+
+          if [ ! -f "$ICON_IN" ]; then
+            echo "::error::Icon tidak ditemukan: $ICON_IN"
+            exit 1
+          fi
+
+          echo "Original icon info:"
+          file "$ICON_IN"
+          ls -la "$ICON_IN"
+
+          # Output folder buat icon yang udah di-convert
+          ICON_OUT="$TARGET/icon_fixed.png"
+
+          # Convert ke PNG asli 512x512 pake ImageMagick
+          echo "Converting to real PNG..."
+          convert "$ICON_IN" -resize 512x512^ -gravity center -extent 512x512 \
+            -define png:color-type=6 -strip "$ICON_OUT" || \
+          magick "$ICON_IN" -resize 512x512^ -gravity center -extent 512x512 \
+            -define png:color-type=6 -strip "$ICON_OUT"
+
+          if [ ! -f "$ICON_OUT" ]; then
+            echo "::error::Convert icon gagal"
+            exit 1
+          fi
+
+          echo "Fixed icon info:"
+          file "$ICON_OUT"
+          ls -la "$ICON_OUT"
+
+          echo "icon_path=$ICON_OUT" >> $GITHUB_OUTPUT
 
       - name: Create Project
         id: create
@@ -303,16 +339,24 @@ jobs:
           </resources>
           EOF
 
-      - name: Copy Icon
+      - name: Copy Fixed Icon (Resize per Density)
         run: |
           DIR="${{ steps.create.outputs.dir }}"
-          ICON="${{ github.event.inputs.target_dir }}/${{ github.event.inputs.icon_file }}"
-          if [ -f "$ICON" ]; then
-            for d in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
-              cp "$ICON" "$DIR/app/src/main/res/mipmap-$d/ic_launcher.png"
-            done
-            echo "✓ Icon copied"
-          fi
+          ICON_FIXED="${{ steps.prep_icon.outputs.icon_path }}"
+
+          # Resize per density (mdpi=48, hdpi=72, xhdpi=96, xxhdpi=144, xxxhdpi=192)
+          convert "$ICON_FIXED" -resize 48x48   "$DIR/app/src/main/res/mipmap-mdpi/ic_launcher.png"
+          convert "$ICON_FIXED" -resize 72x72   "$DIR/app/src/main/res/mipmap-hdpi/ic_launcher.png"
+          convert "$ICON_FIXED" -resize 96x96   "$DIR/app/src/main/res/mipmap-xhdpi/ic_launcher.png"
+          convert "$ICON_FIXED" -resize 144x144 "$DIR/app/src/main/res/mipmap-xxhdpi/ic_launcher.png"
+          convert "$ICON_FIXED" -resize 192x192 "$DIR/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png"
+
+          # Verify semua file PNG valid
+          for d in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
+            f="$DIR/app/src/main/res/mipmap-$d/ic_launcher.png"
+            echo "$d: $(file $f)"
+          done
+          echo "✓ All icons converted to real PNG"
 
       - name: Download gradlew
         run: |
