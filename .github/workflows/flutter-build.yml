@@ -4,27 +4,306 @@ on:
   workflow_dispatch:
     inputs:
       target_dir:
-        description: 'Target directory'
+        description: 'Target directory (folder tempat zip disimpan)'
         required: true
+        type: string
+      zip_file:
+        description: 'Nama file zip project'
+        required: false
+        default: 'project.zip'
+        type: string
+      build_type:
+        description: 'Tipe build: apk / appbundle / both'
+        required: false
+        default: 'apk'
+        type: choice
+        options:
+          - apk
+          - appbundle
+          - both
+      build_mode:
+        description: 'Mode build: release / debug / profile'
+        required: false
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - debug
+          - profile
+      flutter_version:
+        description: 'Versi Flutter (default: 3.19.0)'
+        required: false
+        default: '3.19.0'
+        type: string
+      split_per_abi:
+        description: 'Split APK per ABI (lebih kecil per file)'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+
     steps:
-      - uses: actions/checkout@v4
-      
-      - uses: subosito/flutter-action@v2
+      - name: Checkout Repository
+        uses: actions/checkout@v4
         with:
-          flutter-version: '3.19.0'
-      
-      - name: Build APK
+          fetch-depth: 1
+
+      - name: Validate Target Directory
+        id: validate
         run: |
-          cd ${{ github.event.inputs.target_dir }}
+          echo "::group::Validate"
+          TARGET="${{ github.event.inputs.target_dir }}"
+          ZIP="${{ github.event.inputs.zip_file }}"
+
+          if [ ! -d "$TARGET" ]; then
+            echo "::error::Target directory tidak ditemukan: $TARGET"
+            exit 1
+          fi
+
+          if [ ! -f "$TARGET/$ZIP" ]; then
+            echo "::error::File zip tidak ditemukan: $TARGET/$ZIP"
+            echo "Isi folder $TARGET:"
+            ls -la "$TARGET" || true
+            exit 1
+          fi
+
+          echo "target=$TARGET" >> $GITHUB_OUTPUT
+          echo "zip=$ZIP" >> $GITHUB_OUTPUT
+          echo "✓ Validation OK"
+          echo "::endgroup::"
+
+      - name: Extract Project Zip
+        id: extract
+        run: |
+          echo "::group::Extract"
+          TARGET="${{ steps.validate.outputs.target }}"
+          ZIP="${{ steps.validate.outputs.zip }}"
+          EXTRACT_DIR="$TARGET/project"
+
+          rm -rf "$EXTRACT_DIR"
+          mkdir -p "$EXTRACT_DIR"
+
+          unzip -o "$TARGET/$ZIP" -d "$EXTRACT_DIR"
+
+          echo "::group::Extracted Files"
+          ls -la "$EXTRACT_DIR"
+          echo "::endgroup::"
+
+          echo "extract_dir=$EXTRACT_DIR" >> $GITHUB_OUTPUT
+          echo "✓ Extract OK"
+          echo "::endgroup::"
+
+      - name: Detect Flutter Project Root
+        id: detect_root
+        run: |
+          echo "::group::Detect Root"
+          EXTRACT_DIR="${{ steps.extract.outputs.extract_dir }}"
+
+          if [ -f "$EXTRACT_DIR/pubspec.yaml" ]; then
+            ROOT="$EXTRACT_DIR"
+          else
+            FOUND=$(find "$EXTRACT_DIR" -maxdepth 4 -name "pubspec.yaml" -type f -not -path "*/build/*" | head -n 1)
+            if [ -z "$FOUND" ]; then
+              echo "::error::pubspec.yaml tidak ditemukan. Struktur zip salah."
+              echo "Isi folder:"
+              find "$EXTRACT_DIR" -maxdepth 3 -type f | head -n 50
+              exit 1
+            fi
+            ROOT=$(dirname "$FOUND")
+          fi
+
+          echo "root=$ROOT" >> $GITHUB_OUTPUT
+          echo "✓ Flutter project root: $ROOT"
+
+          echo "::group::Project Structure"
+          ls -la "$ROOT" | head -n 30
+          echo "::endgroup::"
+          echo "::endgroup::"
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ github.event.inputs.flutter_version }}
+          channel: 'stable'
+          cache: true
+
+      - name: Flutter Doctor
+        run: flutter doctor -v
+
+      - name: Restore Pub Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.pub-cache
+            ${{ steps.detect_root.outputs.root }}/.dart_tool
+          key: pub-${{ runner.os }}-${{ hashFiles(format('{0}/pubspec.lock', steps.detect_root.outputs.root)) }}
+          restore-keys: |
+            pub-${{ runner.os }}-
+
+      - name: Flutter Pub Get
+        working-directory: ${{ steps.detect_root.outputs.root }}
+        run: |
+          echo "::group::Pub Get"
           flutter pub get
-          flutter build apk --release
-      
+          echo "::endgroup::"
+
+      - name: Prepare Android Build
+        working-directory: ${{ steps.detect_root.outputs.root }}
+        run: |
+          echo "::group::Android Prep"
+          if [ -f "android/local.properties" ]; then
+            rm -f android/local.properties
+          fi
+          if [ -d "android" ]; then
+            echo "✓ Android folder found"
+          else
+            echo "::warning::Folder android/ tidak ditemukan, build akan gagal kalau target APK"
+          fi
+          echo "::endgroup::"
+
+      - name: Build APK
+        if: ${{ github.event.inputs.build_type == 'apk' || github.event.inputs.build_type == 'both' }}
+        working-directory: ${{ steps.detect_root.outputs.root }}
+        run: |
+          echo "::group::Build APK"
+          MODE="${{ github.event.inputs.build_mode }}"
+          SPLIT="${{ github.event.inputs.split_per_abi }}"
+
+          if [ "$SPLIT" == "true" ]; then
+            flutter build apk --$MODE --split-per-abi
+          else
+            flutter build apk --$MODE
+          fi
+          echo "::endgroup::"
+
+      - name: Build App Bundle
+        if: ${{ github.event.inputs.build_type == 'appbundle' || github.event.inputs.build_type == 'both' }}
+        working-directory: ${{ steps.detect_root.outputs.root }}
+        run: |
+          echo "::group::Build App Bundle"
+          MODE="${{ github.event.inputs.build_mode }}"
+          flutter build appbundle --$MODE
+          echo "::endgroup::"
+
+      - name: Locate APK Artifacts
+        id: locate_apk
+        if: ${{ github.event.inputs.build_type == 'apk' || github.event.inputs.build_type == 'both' }}
+        run: |
+          echo "::group::Locate APK"
+          ROOT="${{ steps.detect_root.outputs.root }}"
+          APK_DIR="$ROOT/build/app/outputs/flutter-apk"
+
+          if [ ! -d "$APK_DIR" ]; then
+            echo "::error::Folder APK output tidak ditemukan: $APK_DIR"
+            exit 1
+          fi
+
+          ls -la "$APK_DIR"
+
+          APKS=$(find "$APK_DIR" -maxdepth 1 -name "*.apk" -type f)
+          if [ -z "$APKS" ]; then
+            echo "::error::APK tidak ditemukan setelah build"
+            exit 1
+          fi
+
+          echo "apk_dir=$APK_DIR" >> $GITHUB_OUTPUT
+          echo "✓ APK ditemukan di: $APK_DIR"
+          echo "$APKS"
+          echo "::endgroup::"
+
+      - name: Locate App Bundle Artifacts
+        id: locate_aab
+        if: ${{ github.event.inputs.build_type == 'appbundle' || github.event.inputs.build_type == 'both' }}
+        run: |
+          echo "::group::Locate App Bundle"
+          ROOT="${{ steps.detect_root.outputs.root }}"
+          AAB_DIR="$ROOT/build/app/outputs/bundle"
+
+          if [ ! -d "$AAB_DIR" ]; then
+            echo "::error::Folder AAB output tidak ditemukan: $AAB_DIR"
+            exit 1
+          fi
+
+          AABS=$(find "$AAB_DIR" -name "*.aab" -type f)
+          if [ -z "$AABS" ]; then
+            echo "::error::App Bundle tidak ditemukan setelah build"
+            exit 1
+          fi
+
+          echo "aab_dir=$AAB_DIR" >> $GITHUB_OUTPUT
+          echo "✓ AAB ditemukan di: $AAB_DIR"
+          echo "$AABS"
+          echo "::endgroup::"
+
+      - name: Generate Build Info
+        run: |
+          echo "::group::Build Info"
+          {
+            echo "=== BUILD INFO ==="
+            echo "Job ID: ${{ github.run_id }}"
+            echo "Run Number: ${{ github.run_number }}"
+            echo "Target Dir: ${{ github.event.inputs.target_dir }}"
+            echo "Zip File: ${{ github.event.inputs.zip_file }}"
+            echo "Build Type: ${{ github.event.inputs.build_type }}"
+            echo "Build Mode: ${{ github.event.inputs.build_mode }}"
+            echo "Flutter Version: ${{ github.event.inputs.flutter_version }}"
+            echo "Split Per ABI: ${{ github.event.inputs.split_per_abi }}"
+            echo "Project Root: ${{ steps.detect_root.outputs.root }}"
+            echo "Commit: ${{ github.sha }}"
+            echo "Actor: ${{ github.actor }}"
+            echo "Started: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          } > BUILD_INFO.txt
+
+          cat BUILD_INFO.txt
+          echo "::endgroup::"
+
       - name: Upload APK
+        if: ${{ github.event.inputs.build_type == 'apk' || github.event.inputs.build_type == 'both' }}
         uses: actions/upload-artifact@v4
         with:
           name: apk-release
-          path: ${{ github.event.inputs.target_dir }}/build/app/outputs/flutter-apk/app-release.apk
+          path: ${{ steps.locate_apk.outputs.apk_dir }}/*.apk
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload App Bundle
+        if: ${{ github.event.inputs.build_type == 'appbundle' || github.event.inputs.build_type == 'both' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: appbundle-release
+          path: ${{ steps.locate_aab.outputs.aab_dir }}/*.aab
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload Build Info
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-info
+          path: BUILD_INFO.txt
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Job ID | ${{ github.run_id }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build Type | ${{ github.event.inputs.build_type }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build Mode | ${{ github.event.inputs.build_mode }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Flutter | ${{ github.event.inputs.flutter_version }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Status | ${{ job.status }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
