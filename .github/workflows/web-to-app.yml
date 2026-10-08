@@ -109,10 +109,8 @@ jobs:
           file "$ICON_IN"
           ls -la "$ICON_IN"
 
-          # Output folder buat icon yang udah di-convert
           ICON_OUT="$TARGET/icon_fixed.png"
 
-          # Convert ke PNG asli 512x512 pake ImageMagick
           echo "Converting to real PNG..."
           convert "$ICON_IN" -resize 512x512^ -gravity center -extent 512x512 \
             -define png:color-type=6 -strip "$ICON_OUT" || \
@@ -344,14 +342,12 @@ jobs:
           DIR="${{ steps.create.outputs.dir }}"
           ICON_FIXED="${{ steps.prep_icon.outputs.icon_path }}"
 
-          # Resize per density (mdpi=48, hdpi=72, xhdpi=96, xxhdpi=144, xxxhdpi=192)
           convert "$ICON_FIXED" -resize 48x48   "$DIR/app/src/main/res/mipmap-mdpi/ic_launcher.png"
           convert "$ICON_FIXED" -resize 72x72   "$DIR/app/src/main/res/mipmap-hdpi/ic_launcher.png"
           convert "$ICON_FIXED" -resize 96x96   "$DIR/app/src/main/res/mipmap-xhdpi/ic_launcher.png"
           convert "$ICON_FIXED" -resize 144x144 "$DIR/app/src/main/res/mipmap-xxhdpi/ic_launcher.png"
           convert "$ICON_FIXED" -resize 192x192 "$DIR/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png"
 
-          # Verify semua file PNG valid
           for d in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
             f="$DIR/app/src/main/res/mipmap-$d/ic_launcher.png"
             echo "$d: $(file $f)"
@@ -393,18 +389,14 @@ jobs:
           fi
           echo "apk=$APK" >> $GITHUB_OUTPUT
           echo "✓ APK: $APK"
-
-      - name: Rename APK
-        run: |
-          APK="${{ steps.locate.outputs.apk }}"
-          DIR=$(dirname "$APK")
-          mv "$APK" "$DIR/app-release.apk"
+          echo "✓ Size: $(ls -lh $APK | awk '{print $5}')"
 
       - name: Upload APK
+        if: ${{ steps.locate.outputs.apk != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: web-to-app-apk
-          path: ${{ steps.create.outputs.dir }}/app/build/outputs/apk/**/app-release.apk
+          path: ${{ steps.locate.outputs.apk }}
           retention-days: 7
 
       - name: Summary
