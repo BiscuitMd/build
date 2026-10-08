@@ -58,7 +58,6 @@ jobs:
 
           if [ ! -f "$TARGET/$ZIP" ]; then
             echo "::error::File zip tidak ditemukan: $TARGET/$ZIP"
-            echo "Isi folder $TARGET:"
             ls -la "$TARGET" || true
             exit 1
           fi
@@ -97,7 +96,6 @@ jobs:
 
           ROOT=""
 
-          # Cek di root
           if [ -f "$EXTRACT_DIR/settings.gradle" ] || [ -f "$EXTRACT_DIR/settings.gradle.kts" ]; then
             ROOT="$EXTRACT_DIR"
           elif [ -f "$EXTRACT_DIR/build.gradle" ] || [ -f "$EXTRACT_DIR/build.gradle.kts" ]; then
@@ -105,7 +103,6 @@ jobs:
           elif [ -f "$EXTRACT_DIR/gradlew" ]; then
             ROOT="$EXTRACT_DIR"
           else
-            # Cari di dalam folder
             FOUND=$(find "$EXTRACT_DIR" -maxdepth 4 \( \
               -name "settings.gradle" -o \
               -name "settings.gradle.kts" -o \
@@ -114,7 +111,6 @@ jobs:
 
             if [ -z "$FOUND" ]; then
               echo "::error::Project Gradle tidak ditemukan"
-              echo "Struktur zip lu:"
               find "$EXTRACT_DIR" -maxdepth 3 -type f | head -n 50
               exit 1
             fi
@@ -136,23 +132,12 @@ jobs:
           distribution: 'temurin'
           java-version: ${{ github.event.inputs.java_version }}
 
-      - name: Cache Gradle
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles(format('{0}/**/*.gradle*', steps.detect.outputs.root)) }}
-          restore-keys: |
-            gradle-${{ runner.os }}-
-
       - name: Setup Android SDK
         run: |
           echo "::group::Setup Android SDK"
           mkdir -p $HOME/android-sdk/cmdline-tools
           cd $HOME/android-sdk
 
-          echo "Downloading cmdline-tools..."
           curl -sSL "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip" -o cmdline-tools.zip
           unzip -q cmdline-tools.zip -d cmdline-tools-tmp
           mv cmdline-tools-tmp/cmdline-tools cmdline-tools/latest
@@ -184,32 +169,106 @@ jobs:
         with:
           gradle-version: 8.2
 
+      - name: Auto-Generate Missing Icons
+        id: gen_icons
+        working-directory: ${{ steps.detect.outputs.root }}
+        run: |
+          echo "::group::Auto-Generate Missing Icons"
+
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq imagemagick
+
+          # Cari AndroidManifest.xml
+          MANIFEST=$(find . -name "AndroidManifest.xml" -path "*/main/*" -type f | head -n 1)
+          if [ -z "$MANIFEST" ]; then
+            echo "::error::AndroidManifest.xml tidak ditemukan"
+            exit 1
+          fi
+
+          echo "✓ Manifest: $MANIFEST"
+          RES_DIR=$(dirname "$MANIFEST")/res
+
+          if [ ! -d "$RES_DIR" ]; then
+            echo "::error::res/ folder tidak ditemukan"
+            exit 1
+          fi
+
+          echo "✓ Res dir: $RES_DIR"
+
+          # Extract semua nama icon dari manifest
+          ICONS=$(grep -oE '@mipmap/[a-zA-Z0-9_]+' "$MANIFEST" | sed 's|@mipmap/||' | sort -u)
+
+          echo "Icons yang dibutuhin:"
+          echo "$ICONS"
+          echo ""
+
+          # Generate PNG untuk tiap icon di tiap density
+          for icon in $ICONS; do
+            for density_size in "mdpi:48" "hdpi:72" "xhdpi:96" "xxhdpi:144" "xxxhdpi:192"; do
+              density=$(echo "$density_size" | cut -d: -f1)
+              size=$(echo "$density_size" | cut -d: -f2)
+              target_dir="$RES_DIR/mipmap-$density"
+              target_file="$target_dir/$icon.png"
+
+              if [ -f "$target_file" ]; then
+                echo "✓ $target_file (exists)"
+                continue
+              fi
+
+              mkdir -p "$target_dir"
+
+              # Buat placeholder PNG (kotak putih dengan huruf pertama icon name)
+              INITIAL=$(echo "$icon" | head -c 1 | tr '[:lower:]' '[:upper:]')
+
+              # Warna random berdasarkan nama icon (biar beda-beda)
+              case "$icon" in
+                *instagram*) COLOR="#E1306C" ;;
+                *youtube*)   COLOR="#FF0000" ;;
+                *whatsapp*)  COLOR="#25D366" ;;
+                *telegram*)  COLOR="#0088CC" ;;
+                *nxxx*)      COLOR="#FF6B9D" ;;
+                *round*)     COLOR="#4A90E2" ;;
+                *launcher*)  COLOR="#10B981" ;;
+                *)           COLOR="#3B82F6" ;;
+              esac
+
+              convert -size ${size}x${size} "xc:$COLOR" \
+                -gravity center \
+                -pointsize $((size / 2)) \
+                -fill white \
+                -font DejaVu-Sans-Bold \
+                -annotate +0+0 "$INITIAL" \
+                "$target_file"
+
+              echo "✓ Generated: $target_file"
+            done
+          done
+
+          echo ""
+          echo "::group::Final res structure"
+          find "$RES_DIR" -type f -name "*.png" | head -n 50
+          echo "::endgroup::"
+
+          echo "✓ All icons generated"
+          echo "::endgroup::"
+
       - name: Prepare Gradle Wrapper
         working-directory: ${{ steps.detect.outputs.root }}
         run: |
           echo "::group::Prepare Gradle Wrapper"
-
           mkdir -p gradle/wrapper
 
-          # Cek kalau wrapper jar gaada
           if [ ! -f "gradle/wrapper/gradle-wrapper.jar" ]; then
             echo "⚠️ gradle-wrapper.jar missing — generating..."
             gradle wrapper --gradle-version 8.2 --distribution-type bin
-          else
-            echo "✓ gradle-wrapper.jar ada"
           fi
 
-          # Cek gradlew
           if [ ! -f "gradlew" ]; then
             echo "⚠️ gradlew missing — generating..."
             gradle wrapper --gradle-version 8.2 --distribution-type bin
           fi
 
           chmod +x gradlew
-          echo "✓ gradlew executable"
-
-          echo "Isi folder gradle/wrapper:"
-          ls -la gradle/wrapper/
           echo "::endgroup::"
 
       - name: Fix local.properties
@@ -219,88 +278,6 @@ jobs:
           rm -f local.properties
           echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
           cat local.properties
-          echo "✓ local.properties OK"
-          echo "::endgroup::"
-
-      - name: Fix AndroidManifest (Auto-Patch Missing Resources)
-        working-directory: ${{ steps.detect.outputs.root }}
-        run: |
-          echo "::group::Auto-Patch AndroidManifest"
-
-          MANIFEST="app/src/main/AndroidManifest.xml"
-          if [ ! -f "$MANIFEST" ]; then
-            echo "⚠️ AndroidManifest.xml tidak ditemukan di $MANIFEST — skip"
-            exit 0
-          fi
-
-          echo "Backup manifest..."
-          cp "$MANIFEST" "$MANIFEST.bak"
-
-          echo "--- Manifest SEBELUM ---"
-          grep -oP 'android:(icon|roundIcon|theme|banner|logo)="[^"]*"' "$MANIFEST" | sort -u || true
-
-          echo "--- Cek resource yang hilang ---"
-          MISSING_REFS=$(grep -oP '@(mipmap|drawable|style|theme)/[A-Za-z0-9_]+' "$MANIFEST" | sort -u || true)
-
-          if [ -n "$MISSING_REFS" ]; then
-            echo "Referensi resource yang dipakai manifest:"
-            echo "$MISSING_REFS"
-          fi
-
-          echo "--- Bikin placeholder resource kalau gaada ---"
-
-          mkdir -p app/src/main/res/mipmap-anydpi-v26
-          mkdir -p app/src/main/res/mipmap-hdpi
-          mkdir -p app/src/main/res/mipmap-mdpi
-          mkdir -p app/src/main/res/mipmap-xhdpi
-          mkdir -p app/src/main/res/mipmap-xxhdpi
-          mkdir -p app/src/main/res/mipmap-xxxhdpi
-          mkdir -p app/src/main/res/values
-
-          MIPMAP_NAMES=$(grep -oP '@mipmap/\K[A-Za-z0-9_]+' "$MANIFEST" | sort -u || true)
-          for NAME in $MIPMAP_NAMES; do
-            if [ ! -f "app/src/main/res/mipmap-hdpi/$NAME.png" ] && \
-               [ ! -f "app/src/main/res/mipmap-anydpi-v26/$NAME.xml" ] && \
-               [ ! -f "app/src/main/res/drawable/$NAME.xml" ]; then
-              echo "  ⚡ Placeholder XML untuk mipmap/$NAME"
-              cat > "app/src/main/res/mipmap-anydpi-v26/$NAME.xml" <<EOF
-<?xml version="1.0" encoding="utf-8"?>
-<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-    <background android:drawable="@android:color/transparent"/>
-    <foreground android:drawable="@android:color/transparent"/>
-</adaptive-icon>
-EOF
-            fi
-          done
-
-          STYLE_REFS=$(grep -oP '@style/\K[A-Za-z0-9_]+' "$MANIFEST" | sort -u || true)
-          if [ -n "$STYLE_REFS" ]; then
-            cat > app/src/main/res/values/styles_autofix.xml <<EOF
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-EOF
-            for STYLE in $STYLE_REFS; do
-              echo "    <style name=\"$STYLE\" parent=\"android:Theme.Material.Light.NoActionBar\"/>" >> app/src/main/res/values/styles_autofix.xml
-            done
-            echo "</resources>" >> app/src/main/res/values/styles_autofix.xml
-            echo "  ✓ Bikin styles untuk: $STYLE_REFS"
-          fi
-
-          echo "--- Manifest SESUDAH ---"
-          grep -oP 'android:(icon|roundIcon|theme|banner|logo)="[^"]*"' "$MANIFEST" | sort -u || true
-
-          echo "✓ Auto-patch selesai"
-          echo "::endgroup::"
-
-      - name: Show Gradle Info
-        working-directory: ${{ steps.detect.outputs.root }}
-        run: |
-          echo "::group::Gradle Version"
-          ./gradlew --version || true
-          echo "::endgroup::"
-
-          echo "::group::Available Tasks (Top 20)"
-          ./gradlew tasks --all 2>&1 | grep -E "^[a-zA-Z].* - " | head -n 20 || true
           echo "::endgroup::"
 
       - name: Build with Gradle
@@ -318,120 +295,57 @@ EOF
             FINAL_TASK="$TASK"
           fi
 
-          echo "==========================================="
           echo "Running: ./gradlew $FINAL_TASK"
-          echo "==========================================="
-
           ./gradlew "$FINAL_TASK" --no-daemon --stacktrace 2>&1 | tee /tmp/gradle.log
           EXIT_CODE=${PIPESTATUS[0]}
 
           echo "Exit code: $EXIT_CODE"
           echo "::endgroup::"
-
           exit $EXIT_CODE
 
-      - name: Show Gradle Error (Kalau Gagal)
+      - name: Show Gradle Error
         if: failure()
         run: |
           echo "::group::Gradle Error (Last 100 lines)"
           if [ -f /tmp/gradle.log ]; then
             tail -n 100 /tmp/gradle.log
-          else
-            echo "Log file tidak ditemukan"
           fi
           echo "::endgroup::"
 
-      - name: Locate APK/AAB Artifacts
+      - name: Locate APK/AAB
         id: locate
         if: success()
         run: |
-          echo "::group::Locate Artifacts"
           ROOT="${{ steps.detect.outputs.root }}"
-
-          APK_DIR="$ROOT/app/build/outputs/apk"
-          AAB_DIR="$ROOT/app/build/outputs/bundle"
-
-          APKS=""
-          AABS=""
-
-          if [ -d "$APK_DIR" ]; then
-            APKS=$(find "$APK_DIR" -name "*.apk" -type f)
-          fi
-
-          if [ -d "$AAB_DIR" ]; then
-            AABS=$(find "$AAB_DIR" -name "*.aab" -type f)
-          fi
+          APKS=$(find "$ROOT/app/build/outputs/apk" -name "*.apk" -type f 2>/dev/null)
+          AABS=$(find "$ROOT/app/build/outputs/bundle" -name "*.aab" -type f 2>/dev/null)
 
           if [ -z "$APKS" ] && [ -z "$AABS" ]; then
-            echo "::error::Tidak ada APK/AAB yang dihasilkan"
-            echo "Isi app/build/outputs:"
-            find "$ROOT/app/build/outputs" -type f 2>/dev/null | head -n 50 || true
+            echo "::error::Tidak ada APK/AAB"
             exit 1
           fi
 
           echo "apks<<EOF" >> $GITHUB_OUTPUT
           echo "$APKS" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
-
           echo "aabs<<EOF" >> $GITHUB_OUTPUT
           echo "$AABS" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
-
-          echo "✓ APKs found:"
-          echo "$APKS"
-          echo "✓ AABs found:"
-          echo "$AABS"
-          echo "::endgroup::"
-
-      - name: Generate Build Info
-        if: always()
-        run: |
-          echo "::group::Build Info"
-          {
-            echo "=== NATIVE BUILD INFO ==="
-            echo "Job ID: ${{ github.run_id }}"
-            echo "Run Number: ${{ github.run_number }}"
-            echo "Target Dir: ${{ github.event.inputs.target_dir }}"
-            echo "Zip File: ${{ github.event.inputs.zip_file }}"
-            echo "Build Task: ${{ github.event.inputs.build_task }}"
-            echo "Build Flavor: ${{ github.event.inputs.build_flavor }}"
-            echo "Java Version: ${{ github.event.inputs.java_version }}"
-            echo "Project Root: ${{ steps.detect.outputs.root }}"
-            echo "Commit: ${{ github.sha }}"
-            echo "Actor: ${{ github.actor }}"
-            echo "Finished: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-          } > BUILD_INFO.txt
-
-          cat BUILD_INFO.txt
-          echo "::endgroup::"
 
       - name: Upload APK
         if: success() && steps.locate.outputs.apks != ''
         uses: actions/upload-artifact@v4
         with:
           name: apk-release
-          path: |
-            ${{ steps.detect.outputs.root }}/app/build/outputs/apk/**/*.apk
-          if-no-files-found: error
+          path: ${{ steps.detect.outputs.root }}/app/build/outputs/apk/**/*.apk
           retention-days: 7
 
-      - name: Upload App Bundle
+      - name: Upload AAB
         if: success() && steps.locate.outputs.aabs != ''
         uses: actions/upload-artifact@v4
         with:
           name: appbundle-release
-          path: |
-            ${{ steps.detect.outputs.root }}/app/build/outputs/bundle/**/*.aab
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Upload Build Info
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-info
-          path: BUILD_INFO.txt
-          if-no-files-found: warn
+          path: ${{ steps.detect.outputs.root }}/app/build/outputs/bundle/**/*.aab
           retention-days: 7
 
       - name: Upload Gradle Log
@@ -440,6 +354,27 @@ EOF
         with:
           name: gradle-log
           path: /tmp/gradle.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Generate Build Info
+        if: always()
+        run: |
+          {
+            echo "=== NATIVE BUILD INFO ==="
+            echo "Job ID: ${{ github.run_id }}"
+            echo "Build Task: ${{ github.event.inputs.build_task }}"
+            echo "Project Root: ${{ steps.detect.outputs.root }}"
+            echo "Finished: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          } > BUILD_INFO.txt
+          cat BUILD_INFO.txt
+
+      - name: Upload Build Info
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-info
+          path: BUILD_INFO.txt
           if-no-files-found: warn
           retention-days: 7
 
@@ -452,7 +387,6 @@ EOF
           echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| Job ID | ${{ github.run_id }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Build Task | ${{ github.event.inputs.build_task }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Flavor | ${{ github.event.inputs.build_flavor }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Java | ${{ github.event.inputs.java_version }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Status | ${{ job.status }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
