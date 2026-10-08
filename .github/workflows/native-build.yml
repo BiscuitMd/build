@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       target_dir:
-        description: 'Target directory (folder tempat zip disimpan)'
+        description: 'Target directory'
         required: true
         type: string
       zip_file:
-        description: 'Nama file zip project'
+        description: 'Nama file zip'
         required: false
         default: 'project.zip'
         type: string
@@ -122,22 +122,68 @@ jobs:
           distribution: 'temurin'
           java-version: ${{ github.event.inputs.java_version }}
 
-      - name: Cache Gradle
-        uses: actions/cache@v4
+      - name: Setup Gradle
+        uses: gradle/gradle-build-action@v3
         with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles(format('{0}/**/*.gradle*', steps.detect_root.outputs.root)) }}
-          restore-keys: |
-            gradle-${{ runner.os }}-
+          gradle-version: 8.2
 
-      - name: Grant Execute Permission for gradlew
+      - name: Setup Android SDK
+        run: |
+          mkdir -p $HOME/android-sdk/cmdline-tools
+          cd $HOME/android-sdk
+
+          echo "Downloading cmdline-tools..."
+          curl -sSL "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip" -o cmdline-tools.zip
+          unzip -q cmdline-tools.zip -d cmdline-tools-tmp
+          mv cmdline-tools-tmp/cmdline-tools cmdline-tools/latest
+          rm -rf cmdline-tools-tmp cmdline-tools.zip
+
+          echo "ANDROID_SDK_ROOT=$HOME/android-sdk" >> $GITHUB_ENV
+          echo "ANDROID_HOME=$HOME/android-sdk" >> $GITHUB_ENV
+          echo "$HOME/android-sdk/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          echo "$HOME/android-sdk/platform-tools" >> $GITHUB_PATH
+
+      - name: Accept Licenses & Install Packages
+        run: |
+          yes | sdkmanager --licenses || true
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Fix Gradle Wrapper (Kalau Missing)
         working-directory: ${{ steps.detect_root.outputs.root }}
         run: |
-          echo "::group::Chmod"
-          chmod +x gradlew || true
-          ls -la gradlew
+          echo "::group::Fix Gradle Wrapper"
+          
+          # Cek kalau gradle-wrapper.jar ga ada
+          if [ ! -f "gradle/wrapper/gradle-wrapper.jar" ]; then
+            echo "⚠️ gradle-wrapper.jar missing — inject manual"
+            
+            mkdir -p gradle/wrapper
+            
+            # Pake gradle command buat generate wrapper
+            if command -v gradle &> /dev/null; then
+              echo "Using installed gradle to generate wrapper..."
+              gradle wrapper --gradle-version 8.2 --distribution-type bin
+            else
+              echo "::error::Gradle command tidak tersedia"
+              exit 1
+            fi
+          else
+            echo "✓ gradle-wrapper.jar ada"
+          fi
+          
+          # Cek gradlew executable
+          if [ -f "gradlew" ]; then
+            chmod +x gradlew
+            echo "✓ gradlew executable"
+          else
+            echo "::error::gradlew missing"
+            exit 1
+          fi
+          
+          # Verifikasi
+          echo "Isi folder gradle/wrapper:"
+          ls -la gradle/wrapper/ || true
+          
           echo "::endgroup::"
 
       - name: Auto-Fix local.properties
