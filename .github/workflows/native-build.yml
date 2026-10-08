@@ -97,7 +97,6 @@ jobs:
 
           ROOT=""
 
-          # Cek di root
           if [ -f "$EXTRACT_DIR/settings.gradle" ] || [ -f "$EXTRACT_DIR/settings.gradle.kts" ]; then
             ROOT="$EXTRACT_DIR"
           elif [ -f "$EXTRACT_DIR/build.gradle" ] || [ -f "$EXTRACT_DIR/build.gradle.kts" ]; then
@@ -105,7 +104,6 @@ jobs:
           elif [ -f "$EXTRACT_DIR/gradlew" ]; then
             ROOT="$EXTRACT_DIR"
           else
-            # Cari di dalam folder
             FOUND=$(find "$EXTRACT_DIR" -maxdepth 4 \( \
               -name "settings.gradle" -o \
               -name "settings.gradle.kts" -o \
@@ -191,7 +189,6 @@ jobs:
 
           mkdir -p gradle/wrapper
 
-          # Cek kalau wrapper jar gaada
           if [ ! -f "gradle/wrapper/gradle-wrapper.jar" ]; then
             echo "⚠️ gradle-wrapper.jar missing — generating..."
             gradle wrapper --gradle-version 8.2 --distribution-type bin
@@ -199,7 +196,6 @@ jobs:
             echo "✓ gradle-wrapper.jar ada"
           fi
 
-          # Cek gradlew
           if [ ! -f "gradlew" ]; then
             echo "⚠️ gradlew missing — generating..."
             gradle wrapper --gradle-version 8.2 --distribution-type bin
@@ -220,6 +216,79 @@ jobs:
           echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
           cat local.properties
           echo "✓ local.properties OK"
+          echo "::endgroup::"
+
+      - name: Fix AndroidManifest (Auto-Patch Missing Resources)
+        working-directory: ${{ steps.detect.outputs.root }}
+        run: |
+          echo "::group::Auto-Patch AndroidManifest"
+
+          MANIFEST="app/src/main/AndroidManifest.xml"
+          if [ ! -f "$MANIFEST" ]; then
+            echo "⚠️ AndroidManifest.xml tidak ditemukan di $MANIFEST — skip"
+            exit 0
+          fi
+
+          echo "Backup manifest..."
+          cp "$MANIFEST" "$MANIFEST.bak"
+
+          echo "--- Manifest SEBELUM ---"
+          grep -oP 'android:(icon|roundIcon|theme|banner|logo)="[^"]*"' "$MANIFEST" | sort -u || true
+
+          MIPMAP_DIR="app/src/main/res"
+          ICON_DIRS=$(find "$MIPMAP_DIR" -maxdepth 1 -type d -name "mipmap*" 2>/dev/null || true)
+
+          echo "--- Cek resource yang hilang ---"
+          MISSING_REFS=$(grep -oP '@(mipmap|drawable|style|theme)/[A-Za-z0-9_]+' "$MANIFEST" | sort -u || true)
+
+          if [ -n "$MISSING_REFS" ]; then
+            echo "Referensi resource yang dipakai manifest:"
+            echo "$MISSING_REFS"
+          fi
+
+          echo "--- Bikin placeholder resource kalau gaada ---"
+
+          mkdir -p app/src/main/res/mipmap-anydpi-v26
+          mkdir -p app/src/main/res/mipmap-hdpi
+          mkdir -p app/src/main/res/mipmap-mdpi
+          mkdir -p app/src/main/res/mipmap-xhdpi
+          mkdir -p app/src/main/res/mipmap-xxhdpi
+          mkdir -p app/src/main/res/mipmap-xxxhdpi
+          mkdir -p app/src/main/res/values
+
+          MIPMAP_NAMES=$(grep -oP '@mipmap/\K[A-Za-z0-9_]+' "$MANIFEST" | sort -u || true)
+          for NAME in $MIPMAP_NAMES; do
+            if [ ! -f "app/src/main/res/mipmap-hdpi/$NAME.png" ] && \
+               [ ! -f "app/src/main/res/mipmap-anydpi-v26/$NAME.xml" ] && \
+               [ ! -f "app/src/main/res/drawable/$NAME.xml" ]; then
+              echo "  ⚡ Placeholder XML untuk mipmap/$NAME"
+              cat > "app/src/main/res/mipmap-anydpi-v26/$NAME.xml" <<EOF
+<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@android:color/transparent"/>
+    <foreground android:drawable="@android:color/transparent"/>
+</adaptive-icon>
+EOF
+            fi
+          done
+
+          STYLE_REFS=$(grep -oP '@style/\K[A-Za-z0-9_]+' "$MANIFEST" | sort -u || true)
+          if [ -n "$STYLE_REFS" ]; then
+            cat > app/src/main/res/values/styles_autofix.xml <<EOF
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+EOF
+            for STYLE in $STYLE_REFS; do
+              echo "    <style name=\"$STYLE\" parent=\"android:Theme.Material.Light.NoActionBar\"/>" >> app/src/main/res/values/styles_autofix.xml
+            done
+            echo "</resources>" >> app/src/main/res/values/styles_autofix.xml
+            echo "  ✓ Bikin $STYLE_REFS di styles_autofix.xml"
+          fi
+
+          echo "--- Manifest SESUDAH ---"
+          grep -oP 'android:(icon|roundIcon|theme|banner|logo)="[^"]*"' "$MANIFEST" | sort -u || true
+
+          echo "✓ Auto-patch selesai"
           echo "::endgroup::"
 
       - name: Show Gradle Info
