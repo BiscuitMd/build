@@ -51,19 +51,46 @@ jobs:
           TARGET="${{ github.event.inputs.target_dir }}"
           ZIP="${{ github.event.inputs.zip_file }}"
 
+          # ═══ CEK FOLDER TARGET ═══
           if [ ! -d "$TARGET" ]; then
             echo "::error::Target directory tidak ditemukan: $TARGET"
             exit 1
           fi
 
+          # ═══ CEK FILE ZIP ═══
           if [ ! -f "$TARGET/$ZIP" ]; then
             echo "::error::File zip tidak ditemukan: $TARGET/$ZIP"
             ls -la "$TARGET" || true
             exit 1
           fi
 
+          # ═══ LOG INFO ZIP SIZE ═══
+          ZIP_BYTES=$(stat -c%s "$TARGET/$ZIP" 2>/dev/null || stat -f%z "$TARGET/$ZIP")
+          ZIP_MB=$((ZIP_BYTES / 1024 / 1024))
+          ZIP_KB=$((ZIP_BYTES / 1024))
+          echo "📦 Zip file: $ZIP"
+          echo "📦 Zip size: ${ZIP_MB} MB (${ZIP_KB} KB / ${ZIP_BYTES} bytes)"
+
+          # ═══ CEK ZIP VALID ═══
+          if ! unzip -t "$TARGET/$ZIP" > /dev/null 2>&1; then
+            echo "::warning::Zip mungkin corrupt, tapi tetap lanjut coba extract"
+          else
+            echo "✓ Zip integrity check OK"
+          fi
+
+          # ═══ CEK DISK SPACE ═══
+          echo "💾 Disk space (before extract):"
+          df -h | head -n 2
+
+          AVAILABLE_MB=$(df -m "$TARGET" | tail -n 1 | awk '{print $4}')
+          echo "💾 Available space: ${AVAILABLE_MB} MB"
+          if [ "$AVAILABLE_MB" -lt 5000 ]; then
+            echo "::warning::Disk space kurang dari 5GB, bisa gagal extract project besar"
+          fi
+
           echo "target=$TARGET" >> $GITHUB_OUTPUT
           echo "zip=$ZIP" >> $GITHUB_OUTPUT
+          echo "zip_size_mb=$ZIP_MB" >> $GITHUB_OUTPUT
           echo "✓ Validation OK"
           echo "::endgroup::"
 
@@ -78,7 +105,21 @@ jobs:
           rm -rf "$EXTRACT_DIR"
           mkdir -p "$EXTRACT_DIR"
 
+          echo "⏳ Extracting $ZIP (${{ steps.validate.outputs.zip_size_mb }} MB)..."
+          START_TIME=$(date +%s)
+
           unzip -o "$TARGET/$ZIP" -d "$EXTRACT_DIR"
+
+          END_TIME=$(date +%s)
+          DURATION=$((END_TIME - START_TIME))
+          echo "✓ Extract selesai dalam ${DURATION}s"
+
+          # ═══ LOG SIZE SETELAH EXTRACT ═══
+          EXTRACT_SIZE=$(du -sh "$EXTRACT_DIR" 2>/dev/null | awk '{print $1}')
+          echo "📂 Extracted size: ${EXTRACT_SIZE}"
+
+          echo "💾 Disk space (after extract):"
+          df -h | head -n 2
 
           echo "::group::Extracted Files"
           ls -la "$EXTRACT_DIR"
@@ -405,6 +446,7 @@ jobs:
             echo "Run Number: ${{ github.run_number }}"
             echo "Target Dir: ${{ github.event.inputs.target_dir }}"
             echo "Zip File: ${{ github.event.inputs.zip_file }}"
+            echo "Zip Size: ${{ steps.validate.outputs.zip_size_mb }} MB"
             echo "Build Task: ${{ github.event.inputs.build_task }}"
             echo "Build Flavor: ${{ github.event.inputs.build_flavor }}"
             echo "Java Version: ${{ github.event.inputs.java_version }}"
@@ -461,6 +503,7 @@ jobs:
           echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| Job ID | ${{ github.run_id }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Zip Size | ${{ steps.validate.outputs.zip_size_mb }} MB |" >> $GITHUB_STEP_SUMMARY
           echo "| Build Task | ${{ github.event.inputs.build_task }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Flavor | ${{ github.event.inputs.build_flavor }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Java | ${{ github.event.inputs.java_version }} |" >> $GITHUB_STEP_SUMMARY
