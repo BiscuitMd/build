@@ -3,9 +3,10 @@ name: Web To App Builder
 on:
   workflow_dispatch:
     inputs:
+      # ═══ INPUT LAMA (JANGAN DIHAPUS) ═══
       target_dir:
-        description: 'Target directory'
-        required: true
+        description: 'Target directory (mode lama: config sudah ada di repo)'
+        required: false
         type: string
       config_file:
         description: 'Nama file config'
@@ -17,11 +18,11 @@ on:
         required: true
         type: string
       app_url:
-        description: 'URL web'
-        required: true
+        description: 'URL web (mode lama)'
+        required: false
         type: string
       icon_file:
-        description: 'Nama file icon'
+        description: 'Nama file icon (mode lama)'
         required: false
         default: 'icon.png'
         type: string
@@ -42,6 +43,28 @@ on:
           - portrait
           - landscape
 
+      # ═══ INPUT BARU (MODE URL — DARI CODE BOT) ═══
+      web_url:
+        description: 'URL website (mode baru: generate config otomatis)'
+        required: false
+        type: string
+      app_label:
+        description: 'Label app (mode baru, dengan spasi)'
+        required: false
+        type: string
+      icon_url:
+        description: 'URL icon (mode baru, opsional)'
+        required: false
+        type: string
+      build_mode:
+        description: 'debug / release (mode baru)'
+        required: false
+        type: string
+      job_id:
+        description: 'Job ID (mode baru)'
+        required: false
+        type: string
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -53,14 +76,110 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Validate
+      # ═══════════════════════════════════════════
+      # 🔥 DETECT MODE + AUTO PREPARE
+      # ═══════════════════════════════════════════
+      - name: Detect Mode & Prepare Files
+        id: prep
         run: |
-          TARGET="${{ github.event.inputs.target_dir }}"
-          [ -d "$TARGET" ] || { echo "::error::Target tidak ada"; exit 1; }
-          [ -f "$TARGET/${{ github.event.inputs.config_file }}" ] || { echo "::error::Config tidak ada"; exit 1; }
+          # ═══ DETECT MODE ═══
+          TARGET_DIR="${{ github.event.inputs.target_dir }}"
+          WEB_URL="${{ github.event.inputs.web_url }}"
+          APP_NAME="${{ github.event.inputs.app_name }}"
+          APP_LABEL="${{ github.event.inputs.app_label }}"
+          APP_URL_OLD="${{ github.event.inputs.app_url }}"
+          ICON_FILE="${{ github.event.inputs.icon_file }}"
+          ICON_URL="${{ github.event.inputs.icon_url }}"
+          BUILD_TYPE="${{ github.event.inputs.build_type }}"
+          BUILD_MODE="${{ github.event.inputs.build_mode }}"
+          ORIENTATION="${{ github.event.inputs.orientation }}"
+          JOB_ID="${{ github.event.inputs.job_id }}"
+          CONFIG_FILE="${{ github.event.inputs.config_file }}"
+          [ -z "$CONFIG_FILE" ] && CONFIG_FILE="config.json"
+
+          # ═══ TENTUKAN MODE ═══
+          # Mode baru: ada web_url DAN (target_dir kosong ATAU target_dir generated dari job_id)
+          # Mode lama: ada target_dir + config_file + app_url
+          MODE=""
+          if [ -n "$WEB_URL" ] && [ -z "$APP_URL_OLD" ]; then
+            MODE="url"
+          elif [ -n "$TARGET_DIR" ] && [ -n "$APP_URL_OLD" ]; then
+            MODE="dir"
+          elif [ -n "$TARGET_DIR" ] && [ -d "$TARGET_DIR" ]; then
+            MODE="dir"
+          elif [ -n "$WEB_URL" ]; then
+            MODE="url"
+          else
+            echo "::error::Tidak bisa detect mode. Kirim (target_dir + app_url) atau (web_url + app_name)."
+            exit 1
+          fi
+
+          echo "mode=$MODE" >> $GITHUB_OUTPUT
+          echo "✓ Mode: $MODE"
+
+          # ═══ PREPARE (kalau mode URL) ═══
+          if [ "$MODE" = "url" ]; then
+            [ -z "$WEB_URL" ] && { echo "::error::web_url wajib di mode URL"; exit 1; }
+            [ -z "$APP_NAME" ] && { echo "::error::app_name wajib di mode URL"; exit 1; }
+
+            # Pilih nama folder: pakai job_id kalau ada, else timestamp
+            if [ -n "$JOB_ID" ]; then
+              TARGET_DIR="uploads/$JOB_ID"
+            else
+              TARGET_DIR="uploads/web2app_$(date +%s)"
+            fi
+
+            mkdir -p "$TARGET_DIR"
+            echo "✓ Created target dir: $TARGET_DIR"
+
+            # Generate config.json
+            DISPLAY_NAME="${APP_LABEL:-$APP_NAME}"
+            cat > "$TARGET_DIR/$CONFIG_FILE" << EOF
+          {
+            "app_name": "$DISPLAY_NAME",
+            "app_url": "$WEB_URL",
+            "orientation": "${ORIENTATION:-portrait}"
+          }
+          EOF
+            echo "✓ Generated $TARGET_DIR/$CONFIG_FILE"
+
+            # Download icon
+            if [ -n "$ICON_URL" ]; then
+              echo "Downloading icon from: $ICON_URL"
+              curl -sSL --max-time 30 "$ICON_URL" -o "$TARGET_DIR/$ICON_FILE" || true
+            fi
+
+            # Kalau icon gagal / ga ada → pakai default 1x1 PNG
+            if [ ! -f "$TARGET_DIR/$ICON_FILE" ] || [ ! -s "$TARGET_DIR/$ICON_FILE" ]; then
+              echo "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==" | base64 -d > "$TARGET_DIR/$ICON_FILE"
+              echo "✓ Using default icon"
+            else
+              echo "✓ Icon downloaded: $(ls -lh $TARGET_DIR/$ICON_FILE | awk '{print $5}')"
+            fi
+
+            # Override build_type dari build_mode kalau ada
+            if [ -n "$BUILD_MODE" ]; then
+              BUILD_TYPE="$BUILD_MODE"
+            fi
+          fi
+
+          # ═══ VALIDASI TARGET DIR (semua mode) ═══
+          [ -z "$TARGET_DIR" ] && { echo "::error::target_dir kosong"; exit 1; }
+          [ -d "$TARGET_DIR" ] || { echo "::error::Target tidak ada: $TARGET_DIR"; exit 1; }
+          [ -f "$TARGET_DIR/$CONFIG_FILE" ] || { echo "::error::Config tidak ada: $TARGET_DIR/$CONFIG_FILE"; exit 1; }
+
+          # Export ke env biar step lain bisa pakai
+          echo "TARGET=$TARGET_DIR" >> $GITHUB_ENV
+          echo "CONFIG_FILE=$CONFIG_FILE" >> $GITHUB_ENV
+          echo "ICON_FILE=$ICON_FILE" >> $GITHUB_ENV
+          echo "BUILD_TYPE_FINAL=${BUILD_TYPE:-debug}" >> $GITHUB_ENV
+          echo "ORIENTATION_FINAL=${ORIENTATION:-portrait}" >> $GITHUB_ENV
+
+          echo "✓ Final TARGET: $TARGET_DIR"
+          echo "✓ Final BUILD_TYPE: ${BUILD_TYPE:-debug}"
 
       - name: Show Config
-        run: cat "${{ github.event.inputs.target_dir }}/${{ github.event.inputs.config_file }}"
+        run: cat "${{ env.TARGET }}/${{ env.CONFIG_FILE }}"
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
@@ -97,8 +216,9 @@ jobs:
       - name: Prepare Icon (Convert to Real PNG)
         id: prep_icon
         run: |
-          TARGET="${{ github.event.inputs.target_dir }}"
-          ICON_IN="$TARGET/${{ github.event.inputs.icon_file }}"
+          TARGET="${{ env.TARGET }}"
+          ICON_FILE="${{ env.ICON_FILE }}"
+          ICON_IN="$TARGET/$ICON_FILE"
 
           if [ ! -f "$ICON_IN" ]; then
             echo "::error::Icon tidak ditemukan: $ICON_IN"
@@ -131,7 +251,7 @@ jobs:
       - name: Create Project
         id: create
         run: |
-          PROJECT_DIR="${{ github.event.inputs.target_dir }}/app_project"
+          PROJECT_DIR="${{ env.TARGET }}/app_project"
           mkdir -p "$PROJECT_DIR/app/src/main/java/com/spartax/webtoapp"
           mkdir -p "$PROJECT_DIR/app/src/main/res/layout"
           mkdir -p "$PROJECT_DIR/app/src/main/res/values"
@@ -223,7 +343,7 @@ jobs:
       - name: Write AndroidManifest.xml
         run: |
           DIR="${{ steps.create.outputs.dir }}"
-          ORIENTATION="${{ github.event.inputs.orientation }}"
+          ORIENTATION="${{ env.ORIENTATION_FINAL }}"
           if [ "$ORIENTATION" = "portrait" ]; then
             SCREEN="portrait"
           else
@@ -326,14 +446,37 @@ jobs:
           </RelativeLayout>
           EOF
 
+      # ═══ WRITE strings.xml — support 2 MODE ═══
       - name: Write strings.xml
         run: |
           DIR="${{ steps.create.outputs.dir }}"
+          TARGET="${{ env.TARGET }}"
+          CONFIG_FILE="${{ env.CONFIG_FILE }}"
+
+          # Coba baca dari config.json dulu (mode URL & mode dir yang punya config)
+          APP_NAME_FINAL=""
+          APP_URL_FINAL=""
+
+          if [ -f "$TARGET/$CONFIG_FILE" ]; then
+            # Parse JSON pakai python (udah ada di ubuntu-latest)
+            APP_NAME_FINAL=$(python3 -c "import json; print(json.load(open('$TARGET/$CONFIG_FILE')).get('app_name',''))" 2>/dev/null || echo "")
+            APP_URL_FINAL=$(python3 -c "import json; print(json.load(open('$TARGET/$CONFIG_FILE')).get('app_url',''))" 2>/dev/null || echo "")
+          fi
+
+          # Fallback ke input workflow kalau config kosong
+          [ -z "$APP_NAME_FINAL" ] && APP_NAME_FINAL="${{ github.event.inputs.app_name }}"
+          [ -z "$APP_NAME_FINAL" ] && APP_NAME_FINAL="${{ github.event.inputs.app_label }}"
+          [ -z "$APP_URL_FINAL" ] && APP_URL_FINAL="${{ github.event.inputs.app_url }}"
+          [ -z "$APP_URL_FINAL" ] && APP_URL_FINAL="${{ github.event.inputs.web_url }}"
+
+          echo "APP_NAME_FINAL=$APP_NAME_FINAL"
+          echo "APP_URL_FINAL=$APP_URL_FINAL"
+
           cat > "$DIR/app/src/main/res/values/strings.xml" << EOF
           <?xml version="1.0" encoding="utf-8"?>
           <resources>
-              <string name="app_name">${{ github.event.inputs.app_name }}</string>
-              <string name="app_url">${{ github.event.inputs.app_url }}</string>
+              <string name="app_name">${APP_NAME_FINAL}</string>
+              <string name="app_url">${APP_URL_FINAL}</string>
           </resources>
           EOF
 
@@ -365,7 +508,7 @@ jobs:
       - name: Build APK
         working-directory: ${{ steps.create.outputs.dir }}
         run: |
-          BUILD_TYPE="${{ github.event.inputs.build_type }}"
+          BUILD_TYPE="${{ env.BUILD_TYPE_FINAL }}"
           if [ "$BUILD_TYPE" = "release" ]; then
             ./gradlew assembleRelease --no-daemon --stacktrace
           else
@@ -376,7 +519,7 @@ jobs:
         id: locate
         run: |
           DIR="${{ steps.create.outputs.dir }}"
-          BUILD_TYPE="${{ github.event.inputs.build_type }}"
+          BUILD_TYPE="${{ env.BUILD_TYPE_FINAL }}"
           if [ "$BUILD_TYPE" = "release" ]; then
             APK=$(find "$DIR/app/build/outputs/apk/release" -name "*.apk" 2>/dev/null | head -n 1)
           else
@@ -406,8 +549,9 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Mode | ${{ steps.prep.outputs.mode }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Target | ${{ env.TARGET }} |" >> $GITHUB_STEP_SUMMARY
           echo "| App Name | ${{ github.event.inputs.app_name }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| URL | ${{ github.event.inputs.app_url }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Mode | ${{ github.event.inputs.build_type }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Orientation | ${{ github.event.inputs.orientation }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| URL | ${{ github.event.inputs.app_url }}${{ github.event.inputs.web_url }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Mode Build | ${{ env.BUILD_TYPE_FINAL }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Status | ${{ job.status }} |" >> $GITHUB_STEP_SUMMARY
